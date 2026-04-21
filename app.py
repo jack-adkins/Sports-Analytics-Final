@@ -392,3 +392,118 @@ st.download_button(
     file_name=f"recommendations_{home_team}_vs_{opp_team}_{location}_{game_state.replace(' ','_')}.csv",
     mime="text/csv"
 )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMBO ANALYSIS TAB
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.subheader("🔗 Player Combination Analysis")
+st.markdown("*Decomposing 5-man lineups to find the most effective 2-man and 3-man combinations*")
+
+from itertools import combinations as itercombs
+
+@st.cache_data
+def compute_combos(team_abbr, min_lineups=3):
+    tid = get_team_id(team_abbr)
+    tl  = lineups[lineups["TEAM_ID"] == tid].copy()
+    required = ["NET_RATING", "OFF_RATING", "DEF_RATING", "PACE", "PIE", "MIN"]
+    tl = tl.dropna(subset=required)
+
+    def parse_players(group_name):
+        parts = [p.strip().rstrip(".") for p in group_name.strip().rstrip(".").split(" - ")]
+        return parts[:5]
+
+    tl["PLAYERS"] = tl["GROUP_NAME"].apply(parse_players)
+    tl = tl[tl["PLAYERS"].apply(len) == 5]
+
+    records = []
+    for _, row in tl.iterrows():
+        for size in [2, 3]:
+            for combo in [tuple(sorted(c)) for c in itercombs(row["PLAYERS"], size)]:
+                records.append({
+                    "COMBO":      " | ".join(combo),
+                    "SIZE":       size,
+                    "NET_RATING": row["NET_RATING"],
+                    "OFF_RATING": row["OFF_RATING"],
+                    "DEF_RATING": row["DEF_RATING"],
+                    "PIE":        row["PIE"],
+                    "LINEUP_MIN": row["MIN"],
+                })
+
+    df = pd.DataFrame(records)
+    agg = df.groupby(["COMBO", "SIZE"]).agg(
+        LINEUPS_TOGETHER = ("NET_RATING", "count"),
+        AVG_NET_RATING   = ("NET_RATING", "mean"),
+        AVG_OFF_RATING   = ("OFF_RATING", "mean"),
+        AVG_DEF_RATING   = ("DEF_RATING", "mean"),
+        AVG_PIE          = ("PIE",        "mean"),
+        TOTAL_MIN        = ("LINEUP_MIN", "sum"),
+    ).reset_index()
+
+    agg = agg[agg["LINEUPS_TOGETHER"] >= min_lineups]
+    for col in ["AVG_NET_RATING", "AVG_OFF_RATING", "AVG_DEF_RATING", "AVG_PIE"]:
+        agg[col] = agg[col].round(1)
+
+    # Sample flag — bottom 40% by LINEUPS_TOGETHER
+    cutoff = agg["LINEUPS_TOGETHER"].quantile(0.40)
+    agg["SAMPLE"] = agg["LINEUPS_TOGETHER"].apply(
+        lambda n: "✅ Reliable" if n >= cutoff else "⚠️ Low Sample"
+    )
+
+    return agg.sort_values("AVG_NET_RATING", ascending=False).reset_index(drop=True)
+
+combo_data = compute_combos(home_team)
+
+pairs = combo_data[combo_data["SIZE"] == 2].head(10).reset_index(drop=True)
+trios = combo_data[combo_data["SIZE"] == 3].head(10).reset_index(drop=True)
+pairs.index += 1
+trios.index += 1
+
+col_combos_1, col_combos_2 = st.columns(2)
+
+display_combo_cols = ["COMBO", "LINEUPS_TOGETHER", "AVG_NET_RATING", "AVG_OFF_RATING", "AVG_DEF_RATING", "AVG_PIE", "SAMPLE"]
+
+def color_net(val):
+    try:
+        v = float(val)
+        if v >= 15:   return "color: #00ff88; font-weight: bold"
+        elif v >= 8:  return "color: #ffdd57"
+        else:         return "color: #ff6b6b"
+    except:
+        return ""
+
+def color_sample(val):
+    if val == "✅ Reliable":   return "color: #00ff88"
+    elif val == "⚠️ Low Sample": return "color: #ffaa00"
+    return ""
+
+with col_combos_1:
+    st.markdown(f"**👥 Top Two-Man Combinations — {home_team}**")
+    st.caption("Averaged across all lineups they appear in together")
+    styled_pairs = pairs[display_combo_cols].style \
+        .map(color_net, subset=["AVG_NET_RATING"]) \
+        .map(color_sample, subset=["SAMPLE"]) \
+        .format({"AVG_NET_RATING": "{:.1f}", "AVG_OFF_RATING": "{:.1f}", "AVG_DEF_RATING": "{:.1f}", "AVG_PIE": "{:.2f}"})
+    st.dataframe(styled_pairs, use_container_width=True, height=390)
+
+with col_combos_2:
+    st.markdown(f"**👥👥 Top Three-Man Combinations — {home_team}**")
+    st.caption("Core trios that consistently drive lineup performance")
+    styled_trios = trios[display_combo_cols].style \
+        .map(color_net, subset=["AVG_NET_RATING"]) \
+        .map(color_sample, subset=["SAMPLE"]) \
+        .format({"AVG_NET_RATING": "{:.1f}", "AVG_OFF_RATING": "{:.1f}", "AVG_DEF_RATING": "{:.1f}", "AVG_PIE": "{:.2f}"})
+    st.dataframe(styled_trios, use_container_width=True, height=390)
+
+# Insight callout
+if not pairs.empty:
+    best_pair  = pairs.iloc[0]["COMBO"]
+    best_pair_net = pairs.iloc[0]["AVG_NET_RATING"]
+    best_trio  = trios.iloc[0]["COMBO"] if not trios.empty else "N/A"
+    best_trio_net = trios.iloc[0]["AVG_NET_RATING"] if not trios.empty else 0
+
+    st.info(
+        f"**Best Pair:** {best_pair} (Avg NET: **{best_pair_net:+.1f}**)  ·  "
+        f"**Best Trio:** {best_trio} (Avg NET: **{best_trio_net:+.1f}**)"
+    )
